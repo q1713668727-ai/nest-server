@@ -32,6 +32,9 @@ export class AppModule implements NestModule {
       .exclude(
         { path: 'login', method: RequestMethod.ALL },
         { path: 'login/*path', method: RequestMethod.ALL },
+        { path: 'index', method: RequestMethod.POST },
+        { path: 'noteDetail', method: RequestMethod.POST },
+        { path: 'video', method: RequestMethod.POST },
 
         // 兼容无 /public 前缀的旧地址
         { path: 'user-avatar/:account/:file', method: RequestMethod.ALL },

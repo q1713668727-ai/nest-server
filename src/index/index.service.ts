@@ -47,7 +47,8 @@ export class IndexService {
       const typeLimit = Math.max(num * 2, 20);
       let noteSql = 'SELECT * FROM `note` ORDER BY RAND() LIMIT ?;';
       let noteParams: any[] = [typeLimit];
-      let videoSql = 'SELECT * FROM `video` ORDER BY RAND() LIMIT ?;';
+      let videoSql =
+        'SELECT v.*, l.avatar AS authorAvatar, l.name AS authorName FROM `video` v LEFT JOIN `login` l ON l.account = v.account ORDER BY RAND() LIMIT ?;';
       let videoParams: any[] = [typeLimit];
       if (excludedNoteIds.length > 0) {
         const placeholders = excludedNoteIds.map(() => '?').join(',');
@@ -56,7 +57,7 @@ export class IndexService {
       }
       if (excludedVideoIds.length > 0) {
         const placeholders = excludedVideoIds.map(() => '?').join(',');
-        videoSql = `SELECT * FROM \`video\` WHERE \`id\` NOT IN (${placeholders}) ORDER BY RAND() LIMIT ?;`;
+        videoSql = `SELECT v.*, l.avatar AS authorAvatar, l.name AS authorName FROM \`video\` v LEFT JOIN \`login\` l ON l.account = v.account WHERE v.\`id\` NOT IN (${placeholders}) ORDER BY RAND() LIMIT ?;`;
         videoParams = [...excludedVideoIds, typeLimit];
       }
       const [noteRows, videoRows] = await Promise.all([this.db.query<any>(noteSql, noteParams), this.db.query<any>(videoSql, videoParams)]);
@@ -158,6 +159,36 @@ export class IndexService {
       return affected === 1 ? { status: 200, message: 'Update success.' } : { status: 404, message: 'Update failed.' };
     } catch (err: any) {
       return { status: 500, message: 'Update failed', error: err.toString() };
+    }
+  }
+
+  async changePassword(body: any) {
+    try {
+      const account = String(body.account || '').trim();
+      const oldPassword = String(body.oldPassword || '');
+      const newPassword = String(body.newPassword || '');
+
+      if (!account || !oldPassword || !newPassword) {
+        return { status: 400, message: '请填写原密码和新密码。' };
+      }
+      if (newPassword.length < 6) {
+        return { status: 400, message: '新密码至少需要 6 位。' };
+      }
+      if (oldPassword === newPassword) {
+        return { status: 400, message: '新密码不能和原密码相同。' };
+      }
+
+      const rows = await this.db.query<any>('SELECT `password` FROM `login` WHERE `account` = ? LIMIT 1;', [account]);
+      if (!rows.length) return { status: 404, message: '账号不存在。' };
+      if (String(rows[0].password || '') !== oldPassword) {
+        return { status: 401, message: '原密码不正确。' };
+      }
+
+      const result: any = await this.db.query('UPDATE `login` SET `password` = ? WHERE `account` = ? LIMIT 1;', [newPassword, account]);
+      const affected = result[0]?.affectedRows ?? result.affectedRows ?? 0;
+      return affected === 1 ? { status: 200, message: '密码修改成功。' } : { status: 404, message: '密码修改失败。' };
+    } catch (err: any) {
+      return { status: 500, message: '密码修改失败', error: err.toString() };
     }
   }
 

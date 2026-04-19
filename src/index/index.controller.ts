@@ -30,6 +30,11 @@ export class IndexController {
     return this.indexService.setUserData(body);
   }
 
+  @Post('changePassword')
+  changePassword(@Body() body: any) {
+    return this.indexService.changePassword(body);
+  }
+
   @Post('getAllUser')
   getAllUser(@Body() body: any) {
     return this.indexService.getAllUser(body);

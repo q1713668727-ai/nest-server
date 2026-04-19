@@ -84,7 +84,12 @@ export class UserService {
     const videoIds = refs.filter((item) => item.contentType === 'video').map((item) => item.id);
     const [noteRows, videoRows] = await Promise.all([
       noteIds.length ? this.db.query<any>(`SELECT * FROM \`note\` WHERE \`id\` IN (${noteIds.map(() => '?').join(',')});`, noteIds) : Promise.resolve([]),
-      videoIds.length ? this.db.query<any>(`SELECT * FROM \`video\` WHERE \`id\` IN (${videoIds.map(() => '?').join(',')});`, videoIds) : Promise.resolve([]),
+      videoIds.length
+        ? this.db.query<any>(
+            `SELECT v.*, l.avatar AS authorAvatar, l.name AS authorName FROM \`video\` v LEFT JOIN \`login\` l ON l.account = v.account WHERE v.\`id\` IN (${videoIds.map(() => '?').join(',')});`,
+            videoIds,
+          )
+        : Promise.resolve([]),
     ]);
     const noteMap = new Map(noteRows.map((item: any) => [item.id, normalizeNoteItem(item)]));
     const videoMap = new Map(videoRows.map((item: any) => [item.id, normalizeVideoItem(item)]));
@@ -244,7 +249,10 @@ export class UserService {
     try {
       const [noteRows, videoRows] = await Promise.all([
         this.db.query<any>('SELECT * FROM `note` WHERE `account` = ?;', [body.account]),
-        this.db.query<any>('SELECT * FROM `video` WHERE `account` = ?;', [body.account]),
+        this.db.query<any>(
+          'SELECT v.*, l.avatar AS authorAvatar, l.name AS authorName FROM `video` v LEFT JOIN `login` l ON l.account = v.account WHERE v.`account` = ?;',
+          [body.account],
+        ),
       ]);
       const list = [...noteRows.map((item) => normalizeNoteItem(item)), ...videoRows.map((item) => normalizeVideoItem(item))].sort(
         (a, b) => Number(b.id || 0) - Number(a.id || 0),
