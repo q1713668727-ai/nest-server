@@ -40,6 +40,11 @@ export class IndexController {
     return this.indexService.getAllUser(body);
   }
 
+  @Post('searchContent')
+  searchContent(@Body() body: any) {
+    return this.indexService.searchContent(body);
+  }
+
   @Post('getConversation')
   getConversation(@Body() body: any) {
     return this.indexService.getConversation(body);

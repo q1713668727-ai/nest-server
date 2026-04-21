@@ -79,16 +79,45 @@ export class IndexService {
       if (!Array.isArray(rows) || !rows.length) return { status: 404, message: 'Note not found.' };
 
       const note = rows[0] || {};
-      const comments = parseNoteComments(note.comment).map((item: any, index: number) => ({
-        id: item?.id ?? index,
-        account: String(item?.account || ''),
-        name: String(item?.name || item?.account || '用户'),
-        text: String(item?.text || ''),
-        avatar: String(item?.avatar || ''),
-        likeCount: toSafeNumber(item?.likeCount ?? item?.likes ?? item?.likess, 0),
-        location: String(item?.location || ''),
-        date: String(item?.date || ''),
-      }));
+      const account = String(body?.account || '').trim();
+      const comments = parseNoteComments(note.comment).map((item: any, index: number) => {
+        const likeUsers = normalizeLikeUsers(item?.likeUsers || item?.likeAccounts || item?.likeUserInfo);
+        const liked = account ? likeUsers.some((user: any) => String(user?.account || '').trim() === account) : false;
+        const replies = Array.isArray(item?.replies)
+          ? item.replies.map((reply: any, replyIndex: number) => {
+              const replyLikeUsers = normalizeLikeUsers(reply?.likeUsers || reply?.likeAccounts || reply?.likeUserInfo);
+              const replyLiked = account ? replyLikeUsers.some((user: any) => String(user?.account || '').trim() === account) : false;
+
+              return {
+                id: reply?.id ?? replyIndex + 1,
+                parentId: item?.id ?? index + 1,
+                account: String(reply?.account || ''),
+                name: String(reply?.name || reply?.account || '用户'),
+                text: String(reply?.text || ''),
+                avatar: String(reply?.avatar || ''),
+                likeCount: toSafeNumber(reply?.likeCount ?? reply?.likes ?? reply?.likess, replyLikeUsers.length),
+                liked: replyLiked,
+                location: String(reply?.location || ''),
+                date: String(reply?.date || ''),
+                replyToName: String(reply?.replyToName || ''),
+                replyToAccount: String(reply?.replyToAccount || ''),
+              };
+            })
+          : [];
+
+        return {
+          id: item?.id ?? index + 1,
+          account: String(item?.account || ''),
+          name: String(item?.name || item?.account || '用户'),
+          text: String(item?.text || ''),
+          avatar: String(item?.avatar || ''),
+          likeCount: toSafeNumber(item?.likeCount ?? item?.likes ?? item?.likess, likeUsers.length),
+          liked,
+          location: String(item?.location || ''),
+          date: String(item?.date || ''),
+          replies,
+        };
+      });
 
       return {
         status: 200,
@@ -221,6 +250,40 @@ export class IndexService {
     }
   }
 
+  async searchContent(body: any) {
+    try {
+      const keyword = String(body.keyword || '').trim();
+      const type = String(body.type || 'note').trim().toLowerCase() === 'video' ? 'video' : 'note';
+      const limit = Math.max(Math.min(Number(body.limit) || 20, 50), 1);
+      const offset = Math.max(Number(body.offset) || 0, 0);
+      const like = `%${keyword}%`;
+
+      if (type === 'video') {
+        const whereSql = keyword ? 'WHERE (v.`title` LIKE ? OR v.`brief` LIKE ? OR v.`name` LIKE ? OR v.`account` LIKE ?)' : '';
+        const params = keyword ? [like, like, like, like] : [];
+        const countRows = await this.db.query<any>(`SELECT COUNT(*) AS total FROM \`video\` v ${whereSql};`, params);
+        const rows = await this.db.query<any>(
+          `SELECT v.*, l.avatar AS authorAvatar, l.name AS authorName FROM \`video\` v LEFT JOIN \`login\` l ON l.account = v.account ${whereSql} ORDER BY v.\`id\` DESC LIMIT ? OFFSET ?;`,
+          [...params, limit, offset],
+        );
+        return { status: 200, message: 'Fetch success.', result: rows.map((item) => normalizeVideoItem(item)), total: Number(countRows[0]?.total || 0) };
+      }
+
+      const whereSql = keyword ? 'WHERE (`title` LIKE ? OR `brief` LIKE ? OR `name` LIKE ? OR `account` LIKE ?)' : '';
+      const params = keyword ? [like, like, like, like] : [];
+      const countRows = await this.db.query<any>(`SELECT COUNT(*) AS total FROM \`note\` ${whereSql};`, params);
+      const rows = await this.db.query<any>(`SELECT * FROM \`note\` ${whereSql} ORDER BY \`id\` DESC LIMIT ? OFFSET ?;`, [...params, limit, offset]);
+      return {
+        status: 200,
+        message: 'Fetch success.',
+        result: rows.map((item) => ({ ...item, contentType: 'note', feedKey: `note-${item.id}` })),
+        total: Number(countRows[0]?.total || 0),
+      };
+    } catch (err: any) {
+      return { status: 500, message: 'Search content failed', error: err.toString() };
+    }
+  }
+
   async getConversation(body: any) {
     try {
       const account = String(body.account || '').trim();
@@ -312,7 +375,7 @@ export class IndexService {
       if (!noteId) return { status: 400, message: `Missing ${table} id.` };
       const result = await this.db.query<any>(`SELECT \`comment\` FROM \`${table}\` WHERE \`id\` = ?;`, [noteId]);
       if (!result.length) return { status: 404, message: `${table} not found.` };
-      const oldComments = parseNoteComments(result[0].comment).map((item: any) => {
+      const oldComments = parseNoteComments(result[0].comment).map((item: any, index: number) => {
         const likeUsers = normalizeLikeUsers(item.likeUsers || item.likeAccounts || item.likeUserInfo)
           .map((user: any) => ({
             account: String(user.account || '').trim(),
@@ -322,28 +385,65 @@ export class IndexService {
           .filter((user: any) => user.account);
         return {
           ...item,
-          id: toSafeNumber(item.id, Date.now()),
+          id: toSafeNumber(item.id, index + 1),
           likeUsers,
           likeCount: toSafeNumber(item.likeCount || item.likes, likeUsers.length),
           replies: Array.isArray(item.replies)
-            ? item.replies.map((reply: any) => ({
-                ...reply,
-                id: toSafeNumber(reply.id, Date.now()),
-                likeCount: toSafeNumber(reply.likeCount || reply.likes, 0),
-              }))
+            ? item.replies.map((reply: any, replyIndex: number) => {
+                const replyLikeUsers = normalizeLikeUsers(reply.likeUsers || reply.likeAccounts || reply.likeUserInfo)
+                  .map((user: any) => ({
+                    account: String(user.account || '').trim(),
+                    name: user.name || '',
+                    avatar: user.avatar || '',
+                  }))
+                  .filter((user: any) => user.account);
+                return {
+                  ...reply,
+                  id: toSafeNumber(reply.id, replyIndex + 1),
+                  parentId: toSafeNumber(reply.parentId, toSafeNumber(item.id, index + 1)),
+                  likeUsers: replyLikeUsers,
+                  likeCount: toSafeNumber(reply.likeCount || reply.likes, replyLikeUsers.length),
+                };
+              })
             : [],
         };
       });
       const action = String(body.action || 'add').trim();
       if (action === 'like') {
         const commentId = toSafeNumber(body.commentId);
+        const commentIndex = Number(body.commentIndex);
         const parentId = toSafeNumber(body.parentId);
+        const parentIndex = Number(body.parentIndex);
+        const replyIndex = Number(body.replyIndex);
         const account = String(body.account || '').trim();
         if (!commentId || !account) return { status: 400, message: 'Missing commentId or account.' };
-        if (parentId !== 0) return { status: 400, message: 'Only top-level comments support likes.' };
-        const targetIndex = oldComments.findIndex((item: any) => toSafeNumber(item.id) === commentId);
+        const targetIndex = parentId
+          ? Number.isInteger(parentIndex) &&
+            parentIndex >= 0 &&
+            parentIndex < oldComments.length &&
+            toSafeNumber(oldComments[parentIndex].id) === parentId
+            ? parentIndex
+            : oldComments.findIndex((item: any) => toSafeNumber(item.id) === parentId)
+          : Number.isInteger(commentIndex) &&
+              commentIndex >= 0 &&
+              commentIndex < oldComments.length &&
+              toSafeNumber(oldComments[commentIndex].id) === commentId
+            ? commentIndex
+            : oldComments.findIndex((item: any) => toSafeNumber(item.id) === commentId);
         if (targetIndex === -1) return { status: 404, message: 'Comment not found.' };
-        const current = oldComments[targetIndex];
+
+        const replies = Array.isArray(oldComments[targetIndex].replies) ? oldComments[targetIndex].replies : [];
+        const targetReplyIndex = parentId
+          ? Number.isInteger(replyIndex) &&
+            replyIndex >= 0 &&
+            replyIndex < replies.length &&
+            toSafeNumber(replies[replyIndex].id) === commentId
+            ? replyIndex
+            : replies.findIndex((item: any) => toSafeNumber(item.id) === commentId)
+          : -1;
+        if (parentId && targetReplyIndex === -1) return { status: 404, message: 'Reply not found.' };
+
+        const current = parentId ? replies[targetReplyIndex] : oldComments[targetIndex];
         const likeUsers = Array.isArray(current.likeUsers) ? [...current.likeUsers] : [];
         const existsIndex = likeUsers.findIndex((user: any) => String(user.account || '') === account);
         let liked = false;
@@ -352,16 +452,28 @@ export class IndexService {
           likeUsers.push({ account, name: body.name || '', avatar: body.avatar || '' });
           liked = true;
         }
-        oldComments[targetIndex] = { ...current, likeUsers, likeCount: likeUsers.length };
+        if (parentId) {
+          replies[targetReplyIndex] = { ...current, likeUsers, likeCount: likeUsers.length };
+          oldComments[targetIndex] = { ...oldComments[targetIndex], replies };
+        } else {
+          oldComments[targetIndex] = { ...current, likeUsers, likeCount: likeUsers.length };
+        }
         const updateLikeRes: any = await this.db.query(`UPDATE \`${table}\` SET \`comment\` = ? WHERE \`id\` = ?;`, [JSON.stringify(oldComments), noteId]);
         const affected = updateLikeRes[0]?.affectedRows ?? updateLikeRes.affectedRows ?? 0;
-        if (affected === 1) return { status: 200, message: 'Comment like updated.', result: { commentId, liked, likeCount: likeUsers.length, likeUsers } };
+        if (affected === 1) return { status: 200, message: 'Comment like updated.', result: { commentId, commentIndex: targetIndex, replyIndex: targetReplyIndex, parentId, liked, likeCount: likeUsers.length, likeUsers } };
         return { status: 404, message: 'Comment like update failed.' };
       }
       if (action === 'reply') {
         const parentId = toSafeNumber(body.parentId);
+        const parentIndex = Number(body.parentIndex);
         if (!parentId) return { status: 400, message: 'Missing parentId.' };
-        const parentIdx = oldComments.findIndex((item: any) => toSafeNumber(item.id) === parentId);
+        const parentIdx =
+          Number.isInteger(parentIndex) &&
+          parentIndex >= 0 &&
+          parentIndex < oldComments.length &&
+          toSafeNumber(oldComments[parentIndex].id) === parentId
+            ? parentIndex
+            : oldComments.findIndex((item: any) => toSafeNumber(item.id) === parentId);
         if (parentIdx === -1) return { status: 404, message: 'Parent comment not found.' };
         const reply = {
           id: Date.now(),
@@ -371,6 +483,7 @@ export class IndexService {
           text: body.text || '',
           avatar: body.avatar || '',
           likeCount: toSafeNumber(body.likeCount || body.likess, 0),
+          likeUsers: [],
           location: body.location || '',
           date: body.date || '',
           replyToName: body.replyToName || '',
@@ -380,7 +493,7 @@ export class IndexService {
         oldComments[parentIdx].replies.push(reply);
         const updateReplyRes: any = await this.db.query(`UPDATE \`${table}\` SET \`comment\` = ? WHERE \`id\` = ?;`, [JSON.stringify(oldComments), noteId]);
         const affected = updateReplyRes[0]?.affectedRows ?? updateReplyRes.affectedRows ?? 0;
-        if (affected === 1) return { status: 200, message: 'Reply added.', result: { parentId, reply } };
+        if (affected === 1) return { status: 200, message: 'Reply added.', result: { parentId, parentIndex: parentIdx, reply } };
         return { status: 404, message: 'Reply insert failed.' };
       }
       const newComment = {

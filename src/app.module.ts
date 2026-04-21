@@ -33,6 +33,8 @@ export class AppModule implements NestModule {
         { path: 'login', method: RequestMethod.ALL },
         { path: 'login/*path', method: RequestMethod.ALL },
         { path: 'index', method: RequestMethod.POST },
+        { path: 'getAllUser', method: RequestMethod.POST },
+        { path: 'searchContent', method: RequestMethod.POST },
         { path: 'noteDetail', method: RequestMethod.POST },
         { path: 'video', method: RequestMethod.POST },
 
