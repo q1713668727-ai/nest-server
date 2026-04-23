@@ -8,7 +8,9 @@ import { UserModule } from './user/user.module';
 import { FileModule } from './file/file.module';
 import { VideoModule } from './video/video.module';
 import { WebsocketModule } from './websocket/websocket.module';
-import { ConfigModule } from '@nestjs/config';
+import { ConfigModule, ConfigService } from '@nestjs/config';
+import { BullModule } from '@nestjs/bullmq';
+import { MarketModule } from './market/market.module';
 
 @Module({
   imports: [
@@ -22,7 +24,19 @@ import { ConfigModule } from '@nestjs/config';
     WebsocketModule,
     ConfigModule.forRoot({
       isGlobal: true, // 这样 process.env 才能读取到 .env 文件
-    })
+    }),
+    BullModule.forRootAsync({
+      inject: [ConfigService],
+      useFactory: (configService: ConfigService) => ({
+        connection: {
+          host: configService.get('REDIS_HOST') || '127.0.0.1',
+          port: Number(configService.get('REDIS_PORT') || 6379),
+          password: configService.get('REDIS_PASSWORD') || undefined,
+          db: Number(configService.get('REDIS_DB') || 0),
+        },
+      }),
+    }),
+    MarketModule,
   ],
 })
 export class AppModule implements NestModule {
@@ -37,6 +51,8 @@ export class AppModule implements NestModule {
         { path: 'searchContent', method: RequestMethod.POST },
         { path: 'noteDetail', method: RequestMethod.POST },
         { path: 'video', method: RequestMethod.POST },
+        { path: 'market', method: RequestMethod.ALL },
+        { path: 'market/*path', method: RequestMethod.ALL },
 
         // 兼容无 /public 前缀的旧地址
         { path: 'user-avatar/:account/:file', method: RequestMethod.ALL },

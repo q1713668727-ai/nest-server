@@ -30,6 +30,16 @@ export class IndexController {
     return this.indexService.setUserData(body);
   }
 
+  @Post('content/toggleHidden')
+  toggleContentHidden(@Body() body: any) {
+    return this.indexService.toggleContentHidden(body);
+  }
+
+  @Post('content/delete')
+  deleteContent(@Body() body: any) {
+    return this.indexService.deleteContent(body);
+  }
+
   @Post('changePassword')
   changePassword(@Body() body: any) {
     return this.indexService.changePassword(body);

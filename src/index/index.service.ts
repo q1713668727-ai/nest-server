@@ -1,6 +1,9 @@
 import { Injectable } from '@nestjs/common';
+import { unlink } from 'fs/promises';
+import { basename, resolve } from 'path';
 import { DbService } from '../db/db.service';
 import {
+  getSafeAccountPath,
   normalizeLikeUsers,
   normalizeVideoItem,
   parseNoteComments,
@@ -11,6 +14,19 @@ import {
 export class IndexService {
   constructor(private readonly db: DbService) {}
 
+  private async ensureHiddenColumn(table: 'note' | 'video') {
+    const columns = await this.db.query<any>(`SHOW COLUMNS FROM \`${table}\`;`);
+    const names = new Set(columns.map((item) => item.Field));
+    if (!names.has('hidden')) {
+      await this.db.query(`ALTER TABLE \`${table}\` ADD COLUMN \`hidden\` TINYINT(1) NOT NULL DEFAULT 0;`);
+    }
+  }
+
+  private visibleClause(alias?: string) {
+    const prefix = alias ? `${alias}.` : '';
+    return `COALESCE(${prefix}\`hidden\`, 0) = 0`;
+  }
+
   private shuffleList(list: any[]) {
     const arr = [...list];
     for (let i = arr.length - 1; i > 0; i -= 1) {
@@ -20,8 +36,60 @@ export class IndexService {
     return arr;
   }
 
+  private removeContentRefText(value: any, contentType: 'note' | 'video', id: number) {
+    const idText = String(id);
+    const typedKey = `${contentType}-${idText}`;
+    return String(value || '')
+      .split(',')
+      .map((item) => item.trim())
+      .filter(Boolean)
+      .filter((item) => item !== typedKey && !(contentType === 'note' && item === idText))
+      .join(',');
+  }
+
+  private resolvePublicFilePath(...parts: string[]) {
+    const publicRoot = resolve(process.cwd(), 'public');
+    const target = resolve(publicRoot, ...parts);
+    return target.startsWith(`${publicRoot}\\`) || target === publicRoot ? target : null;
+  }
+
+  private async unlinkPublicFiles(paths: Array<string | null>) {
+    const deleted: string[] = [];
+    for (const filePath of paths) {
+      if (!filePath) continue;
+      try {
+        await unlink(filePath);
+        deleted.push(filePath);
+      } catch (err: any) {
+        if (err?.code !== 'ENOENT') throw err;
+      }
+    }
+    return deleted;
+  }
+
+  private getContentFilePaths(contentType: 'note' | 'video', row: any) {
+    const safeAccount = getSafeAccountPath(row?.account);
+    if (!safeAccount) return [];
+
+    if (contentType === 'note') {
+      return String(row?.image || '')
+        .split('/')
+        .map((item) => item.trim())
+        .filter(Boolean)
+        .map((file) => this.resolvePublicFilePath('note-image', safeAccount, basename(file)));
+    }
+
+    const videoFile = String(row?.videoUrl || row?.video || row?.mediaUrl || row?.file || row?.url || '').trim();
+    const imageFile = String(row?.image || row?.cover || '').trim();
+    const paths: Array<string | null> = [];
+    if (videoFile) paths.push(this.resolvePublicFilePath('video', safeAccount, basename(videoFile)));
+    if (imageFile) paths.push(this.resolvePublicFilePath('video-cover', safeAccount, basename(imageFile)));
+    return paths;
+  }
+
   async index(body: any) {
     try {
+      await Promise.all([this.ensureHiddenColumn('note'), this.ensureHiddenColumn('video')]);
       const num = body.init ? 20 : 10;
       const idTokens = String(body.idList || '')
         .split(',')
@@ -45,23 +113,23 @@ export class IndexService {
       });
 
       const typeLimit = Math.max(num * 2, 20);
-      let noteSql = 'SELECT * FROM `note` ORDER BY RAND() LIMIT ?;';
+      let noteSql = `SELECT * FROM \`note\` WHERE ${this.visibleClause()} ORDER BY RAND() LIMIT ?;`;
       let noteParams: any[] = [typeLimit];
       let videoSql =
-        'SELECT v.*, l.avatar AS authorAvatar, l.name AS authorName FROM `video` v LEFT JOIN `login` l ON l.account = v.account ORDER BY RAND() LIMIT ?;';
+        `SELECT v.*, l.avatar AS authorAvatar, l.name AS authorName FROM \`video\` v LEFT JOIN \`login\` l ON l.account = v.account WHERE ${this.visibleClause('v')} ORDER BY RAND() LIMIT ?;`;
       let videoParams: any[] = [typeLimit];
       if (excludedNoteIds.length > 0) {
         const placeholders = excludedNoteIds.map(() => '?').join(',');
-        noteSql = `SELECT * FROM \`note\` WHERE \`id\` NOT IN (${placeholders}) ORDER BY RAND() LIMIT ?;`;
+        noteSql = `SELECT * FROM \`note\` WHERE ${this.visibleClause()} AND \`id\` NOT IN (${placeholders}) ORDER BY RAND() LIMIT ?;`;
         noteParams = [...excludedNoteIds, typeLimit];
       }
       if (excludedVideoIds.length > 0) {
         const placeholders = excludedVideoIds.map(() => '?').join(',');
-        videoSql = `SELECT v.*, l.avatar AS authorAvatar, l.name AS authorName FROM \`video\` v LEFT JOIN \`login\` l ON l.account = v.account WHERE v.\`id\` NOT IN (${placeholders}) ORDER BY RAND() LIMIT ?;`;
+        videoSql = `SELECT v.*, l.avatar AS authorAvatar, l.name AS authorName FROM \`video\` v LEFT JOIN \`login\` l ON l.account = v.account WHERE ${this.visibleClause('v')} AND v.\`id\` NOT IN (${placeholders}) ORDER BY RAND() LIMIT ?;`;
         videoParams = [...excludedVideoIds, typeLimit];
       }
       const [noteRows, videoRows] = await Promise.all([this.db.query<any>(noteSql, noteParams), this.db.query<any>(videoSql, videoParams)]);
-      const noteList = noteRows.map((item) => ({ ...item, contentType: 'note', feedKey: `note-${item.id}` }));
+      const noteList = noteRows.map((item) => ({ ...item, contentType: 'note', feedKey: `note-${item.id}`, hidden: Boolean(Number(item.hidden || 0)) }));
       const videoList = videoRows.map((item) => normalizeVideoItem(item));
       const result = this.shuffleList([...noteList, ...videoList]).slice(0, num);
       return { status: 200, message: 'Fetch success.', result };
@@ -72,6 +140,7 @@ export class IndexService {
 
   async noteDetail(body: any) {
     try {
+      await this.ensureHiddenColumn('note');
       const noteId = Number(body?.id);
       if (!Number.isFinite(noteId)) return { status: 400, message: 'Invalid note id.' };
 
@@ -80,6 +149,9 @@ export class IndexService {
 
       const note = rows[0] || {};
       const account = String(body?.account || '').trim();
+      if (Number(note.hidden || 0) && account !== String(note.account || '').trim()) {
+        return { status: 404, message: 'Note not found.' };
+      }
       const comments = parseNoteComments(note.comment).map((item: any, index: number) => {
         const likeUsers = normalizeLikeUsers(item?.likeUsers || item?.likeAccounts || item?.likeUserInfo);
         const liked = account ? likeUsers.some((user: any) => String(user?.account || '').trim() === account) : false;
@@ -134,17 +206,34 @@ export class IndexService {
 
   async clearBadge(body: any) {
     try {
-      const target = `${body.account}-${body.targetUser}`;
-      const result = await this.db.query<any>('SELECT * FROM `msg` WHERE `UserToUser` = ?;', [target]);
-      if (result.length === 0) return { status: 404, message: 'Message record not found.' };
-      const messageObj = JSON.parse(result[0].message);
-      messageObj.read = 0;
-      const updateRes = await this.db.query<any>('UPDATE `msg` SET message = ? WHERE `UserToUser` = ?;', [
-        JSON.stringify(messageObj),
-        target,
-      ]);
-      if ((updateRes[0]?.affectedRows ?? 0) === 0) return { status: 404, message: 'Update failed.' };
-      return { status: 200, message: 'Badge cleared.' };
+      const account = String(body.account || '').trim();
+      const targetUser = String(body.targetUser || '').trim();
+      const clearHistory = Boolean(body.clearHistory);
+      if (!account || !targetUser) return { status: 400, message: 'Missing account or targetUser.' };
+
+      const targets = [`${account}-${targetUser}`, `${targetUser}-${account}`];
+      const rows = await this.db.query<any>('SELECT * FROM `msg` WHERE `UserToUser` IN (?, ?);', targets);
+      if (!rows.length) return { status: 404, message: 'Message record not found.' };
+
+      let affectedTotal = 0;
+      for (const row of rows) {
+        let messageObj: any = {};
+        try {
+          messageObj = JSON.parse(row.message || '{}');
+        } catch {
+          messageObj = {};
+        }
+        messageObj.read = 0;
+        if (clearHistory) messageObj.historyMessage = [];
+        const updateRes: any = await this.db.query('UPDATE `msg` SET message = ? WHERE `UserToUser` = ?;', [
+          JSON.stringify(messageObj),
+          row.UserToUser,
+        ]);
+        affectedTotal += updateRes[0]?.affectedRows ?? updateRes.affectedRows ?? 0;
+      }
+
+      if (affectedTotal === 0) return { status: 404, message: 'Update failed.' };
+      return { status: 200, message: clearHistory ? 'Conversation cleared.' : 'Badge cleared.' };
     } catch (err: any) {
       return { status: 500, message: 'Clear badge failed', error: err.toString() };
     }
@@ -188,6 +277,68 @@ export class IndexService {
       return affected === 1 ? { status: 200, message: 'Update success.' } : { status: 404, message: 'Update failed.' };
     } catch (err: any) {
       return { status: 500, message: 'Update failed', error: err.toString() };
+    }
+  }
+
+  async toggleContentHidden(body: any) {
+    try {
+      const contentType = String(body.contentType || 'note').trim() === 'video' ? 'video' : 'note';
+      const table = contentType;
+      await this.ensureHiddenColumn(table);
+      const id = Number(body.id ?? body.setId);
+      const account = String(body.account || '').trim();
+      const hidden = body.hidden === undefined ? undefined : Number(Boolean(body.hidden));
+      if (!Number.isFinite(id) || !account) return { status: 400, message: 'Missing params.' };
+
+      const rows = await this.db.query<any>(`SELECT \`id\`, \`account\`, \`hidden\` FROM \`${table}\` WHERE \`id\` = ? LIMIT 1;`, [id]);
+      if (!rows.length) return { status: 404, message: `${contentType} not found.` };
+      if (String(rows[0].account || '') !== account) return { status: 403, message: 'No permission.' };
+      const nextHidden = hidden === undefined ? (Number(rows[0].hidden || 0) ? 0 : 1) : hidden;
+      await this.db.query(`UPDATE \`${table}\` SET \`hidden\` = ? WHERE \`id\` = ? LIMIT 1;`, [nextHidden, id]);
+      return { status: 200, message: nextHidden ? 'Hidden.' : 'Visible.', result: { id, contentType, hidden: Boolean(nextHidden) } };
+    } catch (err: any) {
+      return { status: 500, message: 'Toggle hidden failed', error: err.toString() };
+    }
+  }
+
+  async deleteContent(body: any) {
+    try {
+      const contentType = String(body.contentType || 'note').trim() === 'video' ? 'video' : 'note';
+      const table = contentType;
+      const id = Number(body.id ?? body.setId);
+      const account = String(body.account || '').trim();
+      if (!Number.isFinite(id) || !account) return { status: 400, message: 'Missing params.' };
+
+      const rows = await this.db.query<any>(`SELECT * FROM \`${table}\` WHERE \`id\` = ? LIMIT 1;`, [id]);
+      if (!rows.length) return { status: 404, message: `${contentType} not found.` };
+      const row = rows[0];
+      if (String(row.account || '') !== account) return { status: 403, message: 'No permission.' };
+
+      const filePaths = this.getContentFilePaths(contentType, row);
+
+      await this.db.transaction(async (query) => {
+        const deleteResult: any = await query(`DELETE FROM \`${table}\` WHERE \`id\` = ? AND \`account\` = ? LIMIT 1;`, [id, account]);
+        const affected = deleteResult[0]?.affectedRows ?? deleteResult.affectedRows ?? 0;
+        if (affected !== 1) throw new Error('Delete content failed.');
+
+        const users: any[] = await query('SELECT `account`, `likes`, `collects` FROM `login`;');
+        for (const user of users) {
+          const nextLikes = this.removeContentRefText(user.likes, contentType, id);
+          const nextCollects = this.removeContentRefText(user.collects, contentType, id);
+          if (nextLikes !== String(user.likes || '') || nextCollects !== String(user.collects || '')) {
+            await query('UPDATE `login` SET `likes` = ?, `collects` = ? WHERE `account` = ? LIMIT 1;', [nextLikes, nextCollects, user.account]);
+          }
+        }
+      });
+
+      const deletedFiles = body.deleteFiles === false ? [] : await this.unlinkPublicFiles(filePaths);
+      return {
+        status: 200,
+        message: 'Delete success.',
+        result: { id, contentType, deletedFiles: deletedFiles.length },
+      };
+    } catch (err: any) {
+      return { status: 500, message: 'Delete failed', error: err.toString() };
     }
   }
 
@@ -252,6 +403,7 @@ export class IndexService {
 
   async searchContent(body: any) {
     try {
+      await Promise.all([this.ensureHiddenColumn('note'), this.ensureHiddenColumn('video')]);
       const keyword = String(body.keyword || '').trim();
       const type = String(body.type || 'note').trim().toLowerCase() === 'video' ? 'video' : 'note';
       const limit = Math.max(Math.min(Number(body.limit) || 20, 50), 1);
@@ -259,7 +411,9 @@ export class IndexService {
       const like = `%${keyword}%`;
 
       if (type === 'video') {
-        const whereSql = keyword ? 'WHERE (v.`title` LIKE ? OR v.`brief` LIKE ? OR v.`name` LIKE ? OR v.`account` LIKE ?)' : '';
+        const whereSql = keyword
+          ? `WHERE ${this.visibleClause('v')} AND (v.\`title\` LIKE ? OR v.\`brief\` LIKE ? OR v.\`name\` LIKE ? OR v.\`account\` LIKE ?)`
+          : `WHERE ${this.visibleClause('v')}`;
         const params = keyword ? [like, like, like, like] : [];
         const countRows = await this.db.query<any>(`SELECT COUNT(*) AS total FROM \`video\` v ${whereSql};`, params);
         const rows = await this.db.query<any>(
@@ -269,14 +423,16 @@ export class IndexService {
         return { status: 200, message: 'Fetch success.', result: rows.map((item) => normalizeVideoItem(item)), total: Number(countRows[0]?.total || 0) };
       }
 
-      const whereSql = keyword ? 'WHERE (`title` LIKE ? OR `brief` LIKE ? OR `name` LIKE ? OR `account` LIKE ?)' : '';
+      const whereSql = keyword
+        ? `WHERE ${this.visibleClause()} AND (\`title\` LIKE ? OR \`brief\` LIKE ? OR \`name\` LIKE ? OR \`account\` LIKE ?)`
+        : `WHERE ${this.visibleClause()}`;
       const params = keyword ? [like, like, like, like] : [];
       const countRows = await this.db.query<any>(`SELECT COUNT(*) AS total FROM \`note\` ${whereSql};`, params);
       const rows = await this.db.query<any>(`SELECT * FROM \`note\` ${whereSql} ORDER BY \`id\` DESC LIMIT ? OFFSET ?;`, [...params, limit, offset]);
       return {
         status: 200,
         message: 'Fetch success.',
-        result: rows.map((item) => ({ ...item, contentType: 'note', feedKey: `note-${item.id}` })),
+        result: rows.map((item) => ({ ...item, contentType: 'note', feedKey: `note-${item.id}`, hidden: Boolean(Number(item.hidden || 0)) })),
         total: Number(countRows[0]?.total || 0),
       };
     } catch (err: any) {
@@ -292,6 +448,8 @@ export class IndexService {
       const meKey = `${account}-${target}`;
       const targetKey = `${target}-${account}`;
       const result = await this.db.query<any>('SELECT * FROM `msg` WHERE `UserToUser` IN (?, ?);', [meKey, targetKey]);
+      const targetUserRows = await this.db.query<any>('SELECT `account`,`name`,`avatar` FROM `login` WHERE `account` = ? LIMIT 1;', [target]);
+      const targetUser = targetUserRows[0] || null;
       let current: any = null;
       let reverse: any = null;
       result.forEach((item) => {
@@ -324,9 +482,9 @@ export class IndexService {
         firstChat: false,
         result: {
           id: message.id || target,
-          title: message.title || target,
-          avatar: message.avatar || '',
-          url: message.avatar || '',
+          title: String(targetUser?.name || message.title || target),
+          avatar: String(targetUser?.avatar || message.avatar || ''),
+          url: String(targetUser?.avatar || message.avatar || ''),
           read: Number(message.read || 0),
           historyMessage: normalizedHistory,
         },

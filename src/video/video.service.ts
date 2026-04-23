@@ -10,6 +10,7 @@ import { DbService } from '../db/db.service';
 export class VideoService {
   private readonly videoChunksMap: Record<string, { hash: number; chunk: Buffer | string }[]> = {};
   private ensureVideoBriefTask: Promise<void> | null = null;
+  private ensureVideoHiddenTask: Promise<void> | null = null;
 
   constructor(private readonly db: DbService) {}
 
@@ -26,6 +27,21 @@ export class VideoService {
       throw err;
     });
     return this.ensureVideoBriefTask;
+  }
+
+  private async ensureVideoHiddenColumn() {
+    if (this.ensureVideoHiddenTask) return this.ensureVideoHiddenTask;
+    this.ensureVideoHiddenTask = (async () => {
+      const columns = await this.db.query<any>('SHOW COLUMNS FROM `video`;');
+      const names = new Set(columns.map((item) => item.Field));
+      if (!names.has('hidden')) {
+        await this.db.query('ALTER TABLE `video` ADD COLUMN `hidden` TINYINT(1) NOT NULL DEFAULT 0;');
+      }
+    })().catch((err) => {
+      this.ensureVideoHiddenTask = null;
+      throw err;
+    });
+    return this.ensureVideoHiddenTask;
   }
 
   private async generateVideoCover(videoPath: string, coverPath: string) {
@@ -47,15 +63,17 @@ export class VideoService {
   async list(body: any = {}) {
     try {
       await this.ensureVideoBriefColumn();
+      await this.ensureVideoHiddenColumn();
       const targetId = Number(body.targetId ?? body.id ?? 0);
+      const account = String(body.account || '').trim();
       const targetRows = Number.isFinite(targetId) && targetId > 0
         ? await this.db.query<any>(
-            'SELECT v.*, l.avatar AS authorAvatar, l.name AS authorName FROM `video` v LEFT JOIN `login` l ON l.account = v.account WHERE v.id = ? LIMIT 1;',
-            [targetId],
+            'SELECT v.*, l.avatar AS authorAvatar, l.name AS authorName FROM `video` v LEFT JOIN `login` l ON l.account = v.account WHERE v.id = ? AND (COALESCE(v.`hidden`, 0) = 0 OR v.`account` = ?) LIMIT 1;',
+            [targetId, account],
           )
         : [];
       const rows = await this.db.query<any>(
-        'SELECT v.*, l.avatar AS authorAvatar, l.name AS authorName FROM `video` v LEFT JOIN `login` l ON l.account = v.account ORDER BY RAND() LIMIT 30;',
+        'SELECT v.*, l.avatar AS authorAvatar, l.name AS authorName FROM `video` v LEFT JOIN `login` l ON l.account = v.account WHERE COALESCE(v.`hidden`, 0) = 0 ORDER BY RAND() LIMIT 30;',
       );
       const mergedRows = [...targetRows, ...rows.filter((item) => !targetRows.some((target) => String(target.id) === String(item.id)))];
       const result = mergedRows.map((item) => ({

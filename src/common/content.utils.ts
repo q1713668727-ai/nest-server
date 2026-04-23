@@ -99,6 +99,7 @@ export const normalizeNoteItem = (item: any) => ({
   ...item,
   contentType: 'note',
   feedKey: `note-${item.id}`,
+  hidden: Boolean(Number(item.hidden || 0)),
   collects: item.collects != null ? item.collects : item.collect != null ? item.collect : 0,
 });
 
@@ -121,6 +122,7 @@ export const normalizeVideoItem = (item: any) => {
     ...item,
     contentType: 'video',
     feedKey: `video-${item.id}`,
+    hidden: Boolean(Number(item.hidden || 0)),
     cover,
     videoUrl: videoFile,
     brief: item.brief || '',

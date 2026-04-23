@@ -76,6 +76,10 @@ async function bootstrap() {
     prefix: '/public/',
   });
 
+  app.useStaticAssets(process.env.MARKET_UPLOADS_DIR || 'D:/product-server/uploads', {
+    prefix: '/market-uploads/',
+  });
+
   app.use((req, res, next) => {
     res.header('Cross-Origin-Opener-Policy', 'same-origin');
     res.setTimeout(120 * 1000, () => {

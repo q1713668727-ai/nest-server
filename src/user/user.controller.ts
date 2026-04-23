@@ -50,6 +50,11 @@ export class UserController {
     return this.userService.findCollectNote(body);
   }
 
+  @Post('receivedInteractions')
+  receivedInteractions(@Req() req: any, @Body() body: any) {
+    return this.userService.receivedInteractions(req, body);
+  }
+
   @Post('setBackground')
   setBackground(@Body() body: any) {
     return this.userService.setBackground(body);
@@ -58,5 +63,25 @@ export class UserController {
   @Post('setBackgroundEnd')
   setBackgroundEnd(@Body() body: any) {
     return this.userService.setBackgroundEnd(body);
+  }
+
+  @Post('marketAddresses')
+  marketAddresses(@Req() req: any) {
+    return this.userService.marketAddresses(req);
+  }
+
+  @Post('saveMarketAddress')
+  saveMarketAddress(@Req() req: any, @Body() body: any) {
+    return this.userService.saveMarketAddress(req, body);
+  }
+
+  @Post('deleteMarketAddress')
+  deleteMarketAddress(@Req() req: any, @Body() body: any) {
+    return this.userService.deleteMarketAddress(req, body);
+  }
+
+  @Post('setDefaultMarketAddress')
+  setDefaultMarketAddress(@Req() req: any, @Body() body: any) {
+    return this.userService.setDefaultMarketAddress(req, body);
   }
 }
