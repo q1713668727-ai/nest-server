@@ -8,7 +8,7 @@ export class WebsocketServerService implements OnModuleInit {
   constructor(private readonly db: DbService) {}
 
   onModuleInit() {
-    const wss = new WebSocket.Server({ port: 8001 });
+    const wss = new WebSocket.Server({ port: 8002 });
     wss.on('connection', (ws: any) => {
       ws.on('message', async (msg: Buffer) => {
         let objData: any;
