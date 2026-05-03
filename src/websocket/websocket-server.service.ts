@@ -19,16 +19,6 @@ export class WebsocketServerService implements OnModuleInit {
         }
         if (objData && objData.type === 'register' && objData.account) {
           const currentAccount = String(objData.account);
-          wss.clients.forEach((client: any) => {
-            if (client !== ws && client.readyState === WebSocket.OPEN && String(client.account || '') === currentAccount) {
-              try {
-                client.send(JSON.stringify({ type: 'kicked', message: 'Your account logged in elsewhere.' }));
-              } catch {}
-              try {
-                client.close(4001, 'kicked');
-              } catch {}
-            }
-          });
           ws.account = currentAccount;
           try {
             ws.send(JSON.stringify({ type: 201, message: 'registered' }));
