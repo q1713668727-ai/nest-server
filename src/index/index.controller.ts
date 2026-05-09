@@ -25,6 +25,11 @@ export class IndexController {
     return this.indexService.deleteUser(body);
   }
 
+  @Post('message/recall')
+  recallMessage(@Body() body: any) {
+    return this.indexService.recallMessage(body);
+  }
+
   @Post('setUserData')
   setUserData(@Body() body: any) {
     return this.indexService.setUserData(body);

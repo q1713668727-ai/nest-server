@@ -3,6 +3,7 @@ import { Injectable } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { Queue } from 'bullmq';
 import { AuthTokenService } from '../auth/auth-token.service';
+import { ChatRetentionService } from '../chat-retention/chat-retention.service';
 import { DbService } from '../db/db.service';
 
 export const MARKET_ORDER_QUEUE = 'market-order';
@@ -161,6 +162,7 @@ type MarketServiceMessageRow = {
   message_type?: number | null;
   content: string | null;
   payload: string | Record<string, any> | null;
+  recalled_at?: Date | string | null;
   created_at: Date | string;
 };
 
@@ -218,6 +220,7 @@ export class MarketService {
     private readonly db: DbService,
     private readonly authTokenService: AuthTokenService,
     @InjectQueue(MARKET_ORDER_QUEUE) private readonly orderQueue: Queue,
+    private readonly chatRetention: ChatRetentionService,
     configService: ConfigService,
   ) {
     const configured = String(configService.get('MARKET_DB_NAME') || configService.get('PRODUCT_DB_NAME') || 'backstage_server').trim();
@@ -602,6 +605,7 @@ export class MarketService {
         \`payload\` JSON NULL,
         \`is_read\` TINYINT UNSIGNED NOT NULL DEFAULT 0,
         \`created_at\` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        \`recalled_at\` DATETIME NULL,
         PRIMARY KEY (\`id\`),
         KEY \`idx_market_service_messages_session_time\` (\`session_id\`, \`created_at\`)
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;`,
@@ -614,6 +618,11 @@ export class MarketService {
     const userId = columns.find((item) => item.Field === 'user_id');
     if (userId && !String(userId.Default ?? '').length && String(userId.Null).toUpperCase() === 'NO') {
       await this.db.query(`ALTER TABLE ${this.table('market_service_sessions')} MODIFY COLUMN \`user_id\` BIGINT UNSIGNED NOT NULL DEFAULT 0;`);
+    }
+    const messageColumns = await this.db.query<any>(`SHOW COLUMNS FROM ${this.table('market_service_messages')};`);
+    const messageNames = new Set(messageColumns.map((item) => item.Field));
+    if (!messageNames.has('recalled_at')) {
+      await this.db.query(`ALTER TABLE ${this.table('market_service_messages')} ADD COLUMN \`recalled_at\` DATETIME NULL AFTER \`created_at\`;`);
     }
   }
 
@@ -688,6 +697,7 @@ export class MarketService {
       messageType: Number(row.message_type || 1) === 2 ? 'product' : 'text',
       content: row.content || '',
       payload: this.parseJsonValue(row.payload),
+      recalledAt: row.recalled_at ? new Date(row.recalled_at).getTime() || 0 : 0,
       createdAt: new Date(row.created_at).getTime() || Date.now(),
     };
   }
@@ -1428,6 +1438,7 @@ export class MarketService {
 
   async serviceSession(req: any, query: any) {
     await this.ensureServiceTables();
+    await this.chatRetention.cleanupExpiredServiceMessages();
     const account = await this.getAccountFromRequest(req);
     if (!account) return { status: 401, message: '登录已失效，请先登录。', result: null };
     const productId = Number(query?.productId || 0);
@@ -1465,6 +1476,7 @@ export class MarketService {
 
   async serviceSessions(req: any) {
     await this.ensureServiceTables();
+    await this.chatRetention.cleanupExpiredServiceMessages();
     const account = await this.getAccountFromRequest(req);
     if (!account) return { status: 401, message: '登录已失效，请先登录。', result: [] };
     await this.consolidateAllUserServiceSessions(account);
@@ -1538,6 +1550,7 @@ export class MarketService {
 
   async sendServiceMessage(req: any, body: any) {
     await this.ensureServiceTables();
+    await this.chatRetention.cleanupExpiredServiceMessages();
     const account = await this.getAccountFromRequest(req);
     if (!account) return { status: 401, message: '登录已失效，请先登录。', result: null };
     const sessionId = Number(body?.sessionId || body?.id || 0);
@@ -1581,6 +1594,35 @@ export class MarketService {
       [Number(result.insertId)],
     );
     return { status: 200, message: '发送成功', result: rows[0] ? this.mapServiceMessage(rows[0]) : null };
+  }
+
+  async recallServiceMessage(req: any, body: any) {
+    await this.ensureServiceTables();
+    const account = await this.getAccountFromRequest(req);
+    if (!account) return { status: 401, message: '登录已失效，请先登录。', result: null };
+    const messageId = Number(body?.messageId || body?.id || 0);
+    if (!messageId) return { status: 400, message: '消息ID不能为空', result: null };
+
+    const rows = await this.db.query<MarketServiceMessageRow & { user_account?: string }>(
+      `SELECT m.*, s.user_account
+       FROM ${this.table('market_service_messages')} m
+       INNER JOIN ${this.table('market_service_sessions')} s ON s.id = m.session_id
+       WHERE m.id = ? AND s.user_account = ? AND s.status = 1
+       LIMIT 1;`,
+      [messageId, account],
+    );
+    const message = rows[0];
+    if (!message) return { status: 404, message: '消息不存在', result: null };
+    if (Number(message.sender_type) !== 1) return { status: 403, message: '只能撤回自己发送的消息', result: null };
+    if (message.recalled_at) {
+      return { status: 200, message: '消息已撤回', result: { messageId, recalledAt: new Date(message.recalled_at).getTime() || Date.now() } };
+    }
+    const createdAt = new Date(message.created_at).getTime();
+    if (createdAt && Date.now() - createdAt > 60 * 1000) return { status: 400, message: '消息已超过1分钟，不能撤回。', result: null };
+
+    await this.db.query(`UPDATE ${this.table('market_service_messages')} SET recalled_at = CURRENT_TIMESTAMP WHERE id = ?;`, [messageId]);
+    const latest = await this.db.query<MarketServiceMessageRow>(`SELECT * FROM ${this.table('market_service_messages')} WHERE id = ? LIMIT 1;`, [messageId]);
+    return { status: 200, message: '消息已撤回', result: latest[0] ? this.mapServiceMessage(latest[0]) : { messageId, recalledAt: Date.now() } };
   }
 
   private queryServiceSessions(whereSql: string, params: any[] = []) {

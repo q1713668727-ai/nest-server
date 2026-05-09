@@ -100,6 +100,11 @@ export class MarketController {
     return this.marketService.sendServiceMessage(req, body);
   }
 
+  @Post('service/message/recall')
+  recallServiceMessage(@Req() req: any, @Body() body: any) {
+    return this.marketService.recallServiceMessage(req, body);
+  }
+
   @Post('service/session/delete')
   deleteServiceSession(@Req() req: any, @Body() body: any) {
     return this.marketService.deleteServiceSession(req, body);

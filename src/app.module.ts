@@ -11,10 +11,12 @@ import { WebsocketModule } from './websocket/websocket.module';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { BullModule } from '@nestjs/bullmq';
 import { MarketModule } from './market/market.module';
+import { ChatRetentionModule } from './chat-retention/chat-retention.module';
 
 @Module({
   imports: [
     DbModule,
+    ChatRetentionModule,
     AuthModule,
     IndexModule,
     LoginModule,

@@ -1,11 +1,15 @@
 import { Injectable, OnModuleInit } from '@nestjs/common';
+import { ChatRetentionService } from '../chat-retention/chat-retention.service';
 import { DbService } from '../db/db.service';
 
 const WebSocket = require('ws');
 
 @Injectable()
 export class WebsocketServerService implements OnModuleInit {
-  constructor(private readonly db: DbService) {}
+  constructor(
+    private readonly db: DbService,
+    private readonly chatRetention: ChatRetentionService,
+  ) {}
 
   onModuleInit() {
     const wss = new WebSocket.Server({ port: 8002 });
@@ -40,10 +44,17 @@ export class WebsocketServerService implements OnModuleInit {
             chatData.target.read = (chatData.target.read || 0) + 1;
             chatData.target.historyMessage = chatData.target.historyMessage || [];
             chatData.target.historyMessage.push(targetMessage);
+            const pruned = this.chatRetention.pruneHistoryMessages(chatData.target.historyMessage);
+            chatData.target.historyMessage = pruned.items;
+            chatData.target.read = Math.min(
+              Math.max(0, Number(chatData.target.read || 0)),
+              pruned.items.filter((item: any) => item?.mine === false).length,
+            );
           } else if (element.UserToUser === objData.UserToUser) {
             chatData.me = JSON.parse(element.message);
             chatData.me.historyMessage = chatData.me.historyMessage || [];
             chatData.me.historyMessage.push(objData.message);
+            chatData.me.historyMessage = this.chatRetention.pruneHistoryMessages(chatData.me.historyMessage).items;
           }
         });
         if (!chatData.target || !chatData.me) return;

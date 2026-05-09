@@ -1,9 +1,13 @@
 import { Injectable } from '@nestjs/common';
+import { ChatRetentionService } from '../chat-retention/chat-retention.service';
 import { DbService } from '../db/db.service';
 
 @Injectable()
 export class WebsocketHttpService {
-  constructor(private readonly db: DbService) {}
+  constructor(
+    private readonly db: DbService,
+    private readonly chatRetention: ChatRetentionService,
+  ) {}
 
   private async msg(data: any[]) {
     if (!data.length) return [];
@@ -17,6 +21,7 @@ export class WebsocketHttpService {
         parsedMessage = {};
       }
       arr[i] = { ...parsedMessage };
+      arr[i].historyMessage = this.chatRetention.pruneHistoryMessages(arr[i].historyMessage).items;
       const targetId = String(arr[i].id || '').trim();
       if (targetId) targetAccounts.add(targetId);
       const array: any[] = [];
@@ -69,6 +74,7 @@ export class WebsocketHttpService {
       for (let i = 0; i < data.length; i += 1) {
         if (JSON.parse(data[i].message).id !== target) continue;
         data[i].message = JSON.parse(data[i].message);
+        data[i].message.historyMessage = this.chatRetention.pruneHistoryMessages(data[i].message.historyMessage).items;
         obj = {
           id: data[i].message.id,
           title: data[i].message.title,
@@ -93,6 +99,7 @@ export class WebsocketHttpService {
   }
 
   async init(query: any) {
+    await this.chatRetention.cleanupExpiredPrivateConversations();
     const account = query.account;
     const results = await this.db.query<any>('SELECT * FROM `login` LEFT JOIN `msg` ON msg.account = login.account WHERE msg.account = ?;', [account]);
     return {
@@ -102,6 +109,7 @@ export class WebsocketHttpService {
   }
 
   async getMoreMessage(query: any) {
+    await this.chatRetention.cleanupExpiredPrivateConversations();
     const account = query.account;
     const length = parseInt(query.length, 10);
     const target = query.target;

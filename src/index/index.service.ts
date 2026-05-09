@@ -525,6 +525,70 @@ export class IndexService {
     }
   }
 
+  async recallMessage(body: any) {
+    try {
+      const account = String(body.account || '').trim();
+      const target = String(body.target || '').trim();
+      const messageKey = String(body.messageKey || '').trim();
+      if (!account || !target || !messageKey) return { status: 400, message: 'Missing recall params.' };
+
+      const keys = [`${account}-${target}`, `${target}-${account}`];
+      const rows = await this.db.query<any>('SELECT * FROM `msg` WHERE `UserToUser` IN (?, ?);', keys);
+      if (!rows.length) return { status: 404, message: 'Message record not found.' };
+
+      const now = Date.now();
+      const recalledAt = new Date(now).toISOString();
+      let canRecall = false;
+      const updates: Array<{ key: string; message: string }> = [];
+
+      for (const row of rows) {
+        let payload: any = {};
+        try {
+          payload = JSON.parse(row.message || '{}');
+        } catch {
+          payload = {};
+        }
+        const history = Array.isArray(payload.historyMessage) ? payload.historyMessage : [];
+        const nextHistory = history.map((item: any) => {
+          if (this.messageActionKey(item) !== messageKey) return item;
+          const sentAt = this.messageTime(item);
+          if (row.UserToUser === `${account}-${target}` && item?.mine !== true) return item;
+          if (sentAt && now - sentAt > 60 * 1000) return item;
+          canRecall = true;
+          return { ...item, recalledAt, recalledBy: account };
+        });
+        payload.historyMessage = nextHistory;
+        updates.push({ key: row.UserToUser, message: JSON.stringify(payload) });
+      }
+
+      if (!canRecall) return { status: 400, message: '消息已超过1分钟，不能撤回。' };
+      for (const update of updates) {
+        await this.db.query('UPDATE `msg` SET `message` = ? WHERE `UserToUser` = ?;', [update.message, update.key]);
+      }
+      return { status: 200, message: '消息已撤回', result: { messageKey, recalledAt } };
+    } catch (err: any) {
+      return { status: 500, message: 'Recall message failed', error: err.toString() };
+    }
+  }
+
+  private messageActionKey(message: any) {
+    const text = message?.text || {};
+    return [this.messageTime(message) || '', text.type || '', text.message || '', text.url || ''].join('|');
+  }
+
+  private messageTime(message: any) {
+    const value = message?.date ?? message?.time ?? message?.lastTime ?? message?.updateTime ?? message?.updatedAt ?? message?.createTime ?? message?.createdAt;
+    if (typeof value === 'number' && Number.isFinite(value)) return value < 10000000000 ? value * 1000 : value;
+    const raw = String(value || '').trim();
+    if (!raw) return 0;
+    if (/^\d+$/.test(raw)) {
+      const numeric = Number(raw);
+      return Number.isFinite(numeric) ? (numeric < 10000000000 ? numeric * 1000 : numeric) : 0;
+    }
+    const date = new Date(raw);
+    return Number.isNaN(date.getTime()) ? 0 : date.getTime();
+  }
+
   async addComment(body: any) {
     try {
       const noteId = body.id;
